@@ -2,128 +2,110 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-///////////////////////////////////////////////////////////////////////
-// Portions of this code was ported from glob-js by Kevin Thompson.
-// https://github.com/kthompson/glob-js
-///////////////////////////////////////////////////////////////////////
-
 using System;
-using System.Text.RegularExpressions;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace Cake.Core.IO.Globbing
 {
     internal sealed class GlobTokenizer
     {
         private readonly string _pattern;
-        private readonly Regex _identifierRegex;
-        private int _sourceIndex;
-        private char _currentCharacter;
-        private string _currentContent;
-        private GlobTokenKind _currentKind;
+        private string _remainingPattern;
+        private Dictionary<string, GlobTokenKind> tokenKindChars = new Dictionary<string, GlobTokenKind>();
+        private Lazy<Queue<GlobToken>> tokens;
 
         public GlobTokenizer(string pattern)
         {
             _pattern = pattern;
-            _sourceIndex = 0;
-            _currentContent = string.Empty;
-            _currentCharacter = _pattern[_sourceIndex];
-            _identifierRegex = new Regex("^[0-9a-zA-Z\\+&%!@(). _-]$", RegexOptions.Compiled);
+            tokens = new Lazy<Queue<GlobToken>>(() => QueueTokens());
+
+            tokenKindChars.Add("?", GlobTokenKind.CharacterWildcard);
+            tokenKindChars.Add("*", GlobTokenKind.Wildcard);
+            tokenKindChars.Add("**", GlobTokenKind.DirectoryWildcard);
+            tokenKindChars.Add("/", GlobTokenKind.PathSeparator);
+            tokenKindChars.Add(@"\", GlobTokenKind.PathSeparator);
+            tokenKindChars.Add(":", GlobTokenKind.WindowsRoot);
+            tokenKindChars.Add("\0", GlobTokenKind.Current);
+            tokenKindChars.Add(".", GlobTokenKind.Current);
+            tokenKindChars.Add("./", GlobTokenKind.Current);
+            tokenKindChars.Add("..", GlobTokenKind.Parent);
         }
 
+        /// <summary>
+        /// Gets the next token from the pattern.
+        /// </summary>
         public GlobToken Scan()
         {
-            _currentContent = string.Empty;
-            _currentKind = ScanToken();
-
-            return new GlobToken(_currentKind, _currentContent);
+            return tokens.Value.Dequeue();
         }
 
+        /// <summary>
+        /// Peeks the next token from the pattern.
+        /// </summary>
         public GlobToken Peek()
         {
-            var index = _sourceIndex;
-            var token = Scan();
-            _sourceIndex = index;
-            _currentCharacter = _pattern[_sourceIndex];
-            return token;
+            return tokens.Value.Peek();
         }
 
-        private GlobTokenKind ScanToken()
+        /// <summary>
+        /// Loads the tokens into the token queue.
+        /// </summary>
+        private Queue<GlobToken> QueueTokens()
         {
-            if (IsAlphaNumeric(_currentCharacter))
+            var tokenQueue = new Queue<GlobToken>();
+            GlobTokenKind tokenKind;
+
+            while (_remainingPattern.Length > 0)
             {
-                if (_currentCharacter == '.')
+                tokenKind = GetGlobTokenKindAndTrimRemainingPattern();
+
+                if (tokenKind == GlobTokenKind.Identifier)
                 {
-                    TakeCharacter();
-                    if (_currentCharacter == '.')
+                    while (tokenKind == GlobTokenKind.Identifier)
                     {
-                        TakeCharacter();
-                        return GlobTokenKind.Parent;
+                        tokenKind = GetGlobTokenKindAndTrimRemainingPattern();
                     }
-                    if (_currentCharacter == '/')
-                    {
-                        return GlobTokenKind.Current;
-                    }
+
+                    tokenQueue.Enqueue(new GlobToken(GlobTokenKind.Identifier, string.Empty));
                 }
-                while (IsAlphaNumeric(_currentCharacter))
-                {
-                    TakeCharacter();
-                }
-                return GlobTokenKind.Identifier;
+
+                tokenQueue.Enqueue(new GlobToken(tokenKind, string.Empty));
             }
 
-            if (_currentCharacter == '*')
-            {
-                TakeCharacter();
-                if (_currentCharacter == '*')
-                {
-                    TakeCharacter();
-                    return GlobTokenKind.DirectoryWildcard;
-                }
-                return GlobTokenKind.Wildcard;
-            }
-            if (_currentCharacter == '?')
-            {
-                TakeCharacter();
-                return GlobTokenKind.CharacterWildcard;
-            }
-            if (_currentCharacter == '/' || _currentCharacter == '\\')
-            {
-                TakeCharacter();
-                return GlobTokenKind.PathSeparator;
-            }
-            if (_currentCharacter == ':')
-            {
-                TakeCharacter();
-                return GlobTokenKind.WindowsRoot;
-            }
-            if (_currentCharacter == '\0')
-            {
-                return GlobTokenKind.EndOfText;
-            }
-
-            throw new NotSupportedException("Unknown token");
+            return tokenQueue;
         }
 
-        private bool IsAlphaNumeric(char character)
+        /// <summary>
+        /// Searches the private dictionary for a token matching the current (and future) character position(s).
+        /// Performs a greedy match of the keys in the dictionary against the remaining pattern.
+        /// </summary>
+        /// <returns>The GlobTokenKind associated with the mathing entry, or GlobTokenKind.Identifier if none was found. </returns>
+        private GlobTokenKind GetGlobTokenKindAndTrimRemainingPattern()
         {
-            return _identifierRegex.IsMatch(character.ToString());
-        }
+            // Suppose the remaining pattern is 'abc' and the dictionary has keys 'a', 'ab', 'abc', 'ac' and 'b'.
+            // First we want all the keys starting with 'a', i.e. 'a', 'ab', 'abc' and 'ac'
+            // Then we want the greediest match possible
 
-        private void TakeCharacter()
-        {
-            if (_currentCharacter == '\0')
+            int numberOfCharsToRemove;
+            GlobTokenKind tokenKind;
+
+            var matches = tokenKindChars.Where(pair => _remainingPattern.IndexOf(pair.Key) == 0);
+            var greediestMatch = matches.OrderByDescending(pair => pair.Key.Length).FirstOrDefault();
+
+            if (greediestMatch.Key is null)
             {
-                return;
+                tokenKind = GlobTokenKind.Identifier;
+                numberOfCharsToRemove = 1;
+            }
+            else
+            {
+                tokenKind = greediestMatch.Value;
+                numberOfCharsToRemove = greediestMatch.Key.Length;
             }
 
-            _currentContent += _currentCharacter;
-            if (_sourceIndex == _pattern.Length - 1)
-            {
-                _currentCharacter = '\0';
-                return;
-            }
-
-            _currentCharacter = _pattern[++_sourceIndex];
+            _remainingPattern.Substring(numberOfCharsToRemove);
+            return tokenKind;
         }
     }
 }
